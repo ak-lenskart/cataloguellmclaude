@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm -v)",
+      "Bash(export PATH=\"/opt/homebrew/bin:/usr/local/bin:$HOME/.nvm/versions/node/*/bin:$PATH\")",
+      "Read(//Users/akshay/Documents/Claude Projects/judgellm/$HOME/.nvm/versions/**)",
+      "Read(//opt/homebrew/bin/**)",
+      "Read(//usr/local/bin/**)",
+      "Read(//opt/**)",
+      "Read(//usr/local/**)",
+      "WebFetch(domain:www.moengage.com)"
+    ]
+  }
+}
