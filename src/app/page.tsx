@@ -1,15 +1,18 @@
 'use client';
 
-import { useState, useCallback } from 'react';
-import type { JudgeResult, AppStep } from '@/lib/types';
+import { useState, useCallback, useRef } from 'react';
+import type { JudgeResult, AppStep, AppMode, BatchJob } from '@/lib/types';
 import Header from '@/components/Header';
 import ApiKeyInput from '@/components/ApiKeyInput';
 import InputPanel from '@/components/InputPanel';
 import ImagePreview from '@/components/ImagePreview';
 import LoadingState from '@/components/LoadingState';
 import ResultsDashboard from '@/components/ResultsDashboard';
+import BatchInput from '@/components/BatchInput';
+import BatchDashboard from '@/components/BatchDashboard';
 
 export default function Home() {
+  const [mode, setMode] = useState<AppMode>('single');
   const [step, setStep] = useState<AppStep>('input');
   const [pid, setPid] = useState('');
   const [apiKey, setApiKey] = useState('');
@@ -18,6 +21,11 @@ export default function Home() {
   const [result, setResult] = useState<JudgeResult | null>(null);
   const [error, setError] = useState('');
   const [loadingMessage, setLoadingMessage] = useState('');
+
+  // Batch state
+  const [batchJobs, setBatchJobs] = useState<BatchJob[]>([]);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const stopRef = useRef(false);
 
   const handleScrape = useCallback(async (inputPid: string) => {
     setPid(inputPid);
@@ -92,6 +100,88 @@ export default function Home() {
     setError('');
   }, []);
 
+  // Batch processing
+  const handleBatchStart = useCallback(async (pids: string[]) => {
+    if (!apiKey) {
+      setError('Please enter your Gemini API key first');
+      return;
+    }
+    setError('');
+    stopRef.current = false;
+    setBatchRunning(true);
+
+    const initialJobs: BatchJob[] = pids.map(p => ({ pid: p, status: 'pending' }));
+    setBatchJobs(initialJobs);
+
+    for (let i = 0; i < pids.length; i++) {
+      if (stopRef.current) break;
+
+      const currentPid = pids[i];
+
+      // Update status: scraping
+      setBatchJobs(prev => prev.map(j => j.pid === currentPid ? { ...j, status: 'scraping' } : j));
+
+      try {
+        // Scrape
+        const scrapeRes = await fetch(`/api/scrape?pid=${currentPid}`);
+        const scrapeData = await scrapeRes.json();
+
+        if (!scrapeRes.ok || scrapeData.error) {
+          throw new Error(scrapeData.error || 'Scrape failed');
+        }
+
+        const imageUrls: string[] = scrapeData.images;
+
+        // Update status: judging
+        setBatchJobs(prev => prev.map(j => j.pid === currentPid ? { ...j, status: 'judging', imageCount: imageUrls.length, imageUrls } : j));
+
+        if (stopRef.current) break;
+
+        // Judge
+        const judgeRes = await fetch('/api/judge', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pid: currentPid, images: imageUrls, apiKey }),
+        });
+        const judgeData = await judgeRes.json();
+
+        if (!judgeRes.ok || judgeData.error) {
+          throw new Error(judgeData.error || 'Judge failed');
+        }
+
+        // Update status: done
+        setBatchJobs(prev => prev.map(j =>
+          j.pid === currentPid ? { ...j, status: 'done', result: judgeData, imageCount: imageUrls.length, imageUrls } : j
+        ));
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Unknown error';
+        setBatchJobs(prev => prev.map(j =>
+          j.pid === currentPid ? { ...j, status: 'error', error: message } : j
+        ));
+      }
+
+      // Delay between PIDs to avoid rate limits
+      if (i < pids.length - 1 && !stopRef.current) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+
+    setBatchRunning(false);
+  }, [apiKey]);
+
+  const handleBatchStop = useCallback(() => {
+    stopRef.current = true;
+    setBatchRunning(false);
+  }, []);
+
+  const handleBatchReset = useCallback(() => {
+    setBatchJobs([]);
+    setBatchRunning(false);
+    stopRef.current = false;
+  }, []);
+
+  const showBatchResults = batchJobs.length > 0;
+
   return (
     <div className="min-h-screen flex flex-col">
       <Header />
@@ -103,42 +193,58 @@ export default function Home() {
           <div className="animate-fade-in rounded-xl px-4 py-3 text-sm border"
             style={{ background: '#ff4d6a15', borderColor: '#ff4d6a40', color: '#ff4d6a' }}>
             {error}
-            <button onClick={() => setError('')} className="ml-3 underline opacity-70 hover:opacity-100">
-              dismiss
-            </button>
+            <button onClick={() => setError('')} className="ml-3 underline opacity-70 hover:opacity-100">dismiss</button>
           </div>
         )}
 
-        {step === 'input' && (
-          <InputPanel
-            pid={pid}
-            onPidChange={setPid}
-            onScrape={handleScrape}
-            onManualUrls={handleManualUrls}
-          />
+        {/* Mode Switcher — only show when in input state and no batch results */}
+        {step === 'input' && !showBatchResults && (
+          <div className="flex rounded-xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>
+            {(['single', 'batch'] as AppMode[]).map(m => (
+              <button
+                key={m}
+                onClick={() => setMode(m)}
+                className="flex-1 px-6 py-3 text-sm font-medium transition-colors relative"
+                style={{
+                  color: mode === m ? 'var(--accent)' : 'var(--text-dim)',
+                  background: mode === m ? 'var(--accent-glow)' : 'var(--bg-card)',
+                }}
+              >
+                {m === 'single' ? 'Single PID' : 'Batch Analysis (up to 500)'}
+                {mode === m && (
+                  <div className="absolute bottom-0 left-0 right-0 h-0.5" style={{ background: 'var(--accent)' }} />
+                )}
+              </button>
+            ))}
+          </div>
         )}
 
-        {(step === 'loading' || step === 'judging') && (
-          <LoadingState message={loadingMessage} />
+        {/* Single mode */}
+        {mode === 'single' && !showBatchResults && (
+          <>
+            {step === 'input' && (
+              <InputPanel pid={pid} onPidChange={setPid} onScrape={handleScrape} onManualUrls={handleManualUrls} />
+            )}
+            {(step === 'loading' || step === 'judging') && (
+              <LoadingState message={loadingMessage} />
+            )}
+            {step === 'preview' && (
+              <ImagePreview images={images} selected={selectedImages} onSelectionChange={setSelectedImages} onJudge={handleJudge} onBack={handleReset} pid={pid} />
+            )}
+            {step === 'results' && result && (
+              <ResultsDashboard result={result} images={selectedImages} onReset={handleReset} />
+            )}
+          </>
         )}
 
-        {step === 'preview' && (
-          <ImagePreview
-            images={images}
-            selected={selectedImages}
-            onSelectionChange={setSelectedImages}
-            onJudge={handleJudge}
-            onBack={handleReset}
-            pid={pid}
-          />
+        {/* Batch mode — input */}
+        {mode === 'batch' && !showBatchResults && step === 'input' && (
+          <BatchInput onStart={handleBatchStart} disabled={batchRunning} />
         )}
 
-        {step === 'results' && result && (
-          <ResultsDashboard
-            result={result}
-            images={selectedImages}
-            onReset={handleReset}
-          />
+        {/* Batch mode — results dashboard */}
+        {showBatchResults && (
+          <BatchDashboard jobs={batchJobs} onReset={handleBatchReset} onStop={handleBatchStop} isRunning={batchRunning} />
         )}
       </main>
     </div>

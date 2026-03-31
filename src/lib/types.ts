@@ -52,6 +52,19 @@ export interface JudgeResult {
 
 export type AppStep = 'input' | 'loading' | 'preview' | 'judging' | 'results';
 
+export type AppMode = 'single' | 'batch';
+
+export type BatchJobStatus = 'pending' | 'scraping' | 'judging' | 'done' | 'error';
+
+export interface BatchJob {
+  pid: string;
+  status: BatchJobStatus;
+  imageCount?: number;
+  result?: JudgeResult;
+  error?: string;
+  imageUrls?: string[];
+}
+
 export interface ScrapeResponse {
   pid: string;
   images: string[];
