@@ -160,9 +160,10 @@ export default function Home() {
         ));
       }
 
-      // Delay between PIDs to avoid rate limits
+      // Delay between PIDs — Gemini free tier allows ~15 RPM,
+      // each PID uses 1 judge call, so 8s gap keeps us safely under the limit
       if (i < pids.length - 1 && !stopRef.current) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await new Promise(resolve => setTimeout(resolve, 8000));
       }
     }
 

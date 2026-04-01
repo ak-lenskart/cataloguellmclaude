@@ -64,7 +64,7 @@ export default function BatchInput({ onStart, disabled }: Props) {
 
         <div className="flex items-center justify-between mt-4">
           <p className="text-xs" style={{ color: 'var(--text-dim)' }}>
-            ~{Math.ceil(uniquePids.length * 15 / 60)} min estimated
+            ~{Math.ceil(uniquePids.length * 25 / 60)} min estimated (free tier: ~25s/PID)
           </p>
           <button
             onClick={handleStart}

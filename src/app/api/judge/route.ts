@@ -30,52 +30,27 @@ export async function POST(request: NextRequest) {
   }
 }
 
-async function judgeWithGemini(pid: string, images: string[], apiKey: string) {
-  const imageParts = await Promise.all(
-    images.map(async (img, i) => {
-      if (img.startsWith('data:')) {
-        // base64 data URI
-        const match = img.match(/^data:(image\/\w+);base64,(.+)$/);
-        if (!match) throw new Error(`Invalid data URI for image ${i + 1}`);
-        return {
-          inlineData: {
-            mimeType: match[1],
-            data: match[2],
-          },
-        };
-      } else {
-        // URL — download server-side and convert to base64
-        const res = await fetch(img, {
-          signal: AbortSignal.timeout(15000),
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-          },
-        });
-        if (!res.ok) throw new Error(`Failed to fetch image ${i + 1}: ${res.status}`);
-        const buffer = await res.arrayBuffer();
-        const base64 = Buffer.from(buffer).toString('base64');
-        const contentType = res.headers.get('content-type') || 'image/jpeg';
-        return {
-          inlineData: {
-            mimeType: contentType,
-            data: base64,
-          },
-        };
-      }
-    })
-  );
+async function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
-  const contents = [
-    {
-      role: 'user' as const,
-      parts: [
-        ...imageParts,
-        { text: buildJudgeUserPrompt(pid, images.length) },
-      ],
+async function fetchImageAsBase64(url: string, index: number) {
+  const res = await fetch(url, {
+    signal: AbortSignal.timeout(15000),
+    headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' },
+  });
+  if (!res.ok) throw new Error(`Failed to fetch image ${index + 1}: ${res.status}`);
+  const buffer = await res.arrayBuffer();
+  return {
+    inlineData: {
+      mimeType: res.headers.get('content-type') || 'image/jpeg',
+      data: Buffer.from(buffer).toString('base64'),
     },
-  ];
+  };
+}
 
-  const geminiRes = await fetch(
+async function callGemini(apiKey: string, contents: unknown, signal: AbortSignal) {
+  const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
     {
       method: 'POST',
@@ -89,20 +64,69 @@ async function judgeWithGemini(pid: string, images: string[], apiKey: string) {
           responseMimeType: 'application/json',
         },
       }),
-      signal: AbortSignal.timeout(120000),
+      signal,
     }
   );
+  return res;
+}
 
-  if (!geminiRes.ok) {
-    const errBody = await geminiRes.text();
-    throw new Error(`Gemini API error (${geminiRes.status}): ${errBody}`);
+async function judgeWithGemini(pid: string, images: string[], apiKey: string) {
+  // Download all images server-side (sequential to avoid overwhelming Lenskart CDN)
+  const imageParts = [];
+  for (let i = 0; i < images.length; i++) {
+    const img = images[i];
+    if (img.startsWith('data:')) {
+      const match = img.match(/^data:(image\/\w+);base64,(.+)$/);
+      if (!match) throw new Error(`Invalid data URI for image ${i + 1}`);
+      imageParts.push({ inlineData: { mimeType: match[1], data: match[2] } });
+    } else {
+      imageParts.push(await fetchImageAsBase64(img, i));
+    }
   }
 
-  const geminiData = await geminiRes.json();
-  const text = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) throw new Error('Empty response from Gemini');
+  const contents = [
+    {
+      role: 'user' as const,
+      parts: [...imageParts, { text: buildJudgeUserPrompt(pid, images.length) }],
+    },
+  ];
 
-  // Parse JSON from response (strip any markdown fences if present)
-  const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-  return JSON.parse(cleaned);
+  // Retry with exponential backoff for 429 rate limit errors
+  const MAX_RETRIES = 4;
+  const BASE_DELAY_MS = 15000; // 15s initial wait on 429
+
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    const geminiRes = await callGemini(apiKey, contents, AbortSignal.timeout(120000));
+
+    if (geminiRes.status === 429) {
+      // Check Retry-After header if present
+      const retryAfter = geminiRes.headers.get('Retry-After');
+      const waitMs = retryAfter
+        ? parseInt(retryAfter) * 1000
+        : BASE_DELAY_MS * Math.pow(2, attempt); // 15s, 30s, 60s, 120s
+
+      if (attempt < MAX_RETRIES - 1) {
+        await sleep(waitMs);
+        continue;
+      } else {
+        const body = await geminiRes.text();
+        throw new Error(`Gemini rate limit exceeded after ${MAX_RETRIES} retries. Try again in a minute. Details: ${body.slice(0, 200)}`);
+      }
+    }
+
+    if (!geminiRes.ok) {
+      const errBody = await geminiRes.text();
+      throw new Error(`Gemini API error (${geminiRes.status}): ${errBody.slice(0, 300)}`);
+    }
+
+    const geminiData = await geminiRes.json();
+    const text = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) throw new Error('Empty response from Gemini');
+
+    // Strip markdown fences if present
+    const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    return JSON.parse(cleaned);
+  }
+
+  throw new Error('Gemini judge failed after all retries');
 }
